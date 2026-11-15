@@ -4,6 +4,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from v2_engine import GameState, Action, apply_action, public_state
 from v2_ai import parse_player, narrate
 from visual_views import VIEWS
@@ -19,23 +20,27 @@ st.markdown('''<style>.stApp {background:radial-gradient(circle at 70% 5%,#29251
 def reset():
     st.session_state.v2_state=GameState(); st.session_state.v2_view='room'
     st.session_state.v2_messages=[('assistant',INTRO,'')]
+    st.session_state.pop('v2_quick_code', None)
 if 'v2_state' not in st.session_state: reset()
 s=st.session_state.v2_state
 
 def submit(message, action=None):
     flavor=''
-    if action is None:
+    # Direct controls never make an API request. Text normally makes one.
+    from_chat = action is None
+    if from_chat:
         try:
-            client=genai.Client(api_key=KEY)
+            client=genai.Client(api_key=KEY, http_options=types.HttpOptions(
+                timeout=20000, retry_options=types.HttpRetryOptions(attempts=1)))
             action=parse_player(client,MODEL,s,message)
         except Exception:
             # Avoid printing SDK exception strings which could contain private configuration.
-            st.error('Gemini could not interpret your request. Check your model, key or quota privately and retry.')
+            st.error('Gemini did not respond or could not interpret your request. No game state changed. Retry, or use Quick actions below. Check your key, model and quota privately.')
             return
     result=apply_action(s,action,message)
     if result.view in VIEWS: st.session_state.v2_view=result.view
-    if KEY:
-        try: flavor=narrate(genai.Client(api_key=KEY),MODEL,result,s)
+    if from_chat and KEY and st.session_state.get('v2_extra_narration', False):
+        try: flavor=narrate(client,MODEL,result,s)
         except Exception: flavor=''
     st.session_state.v2_messages.extend([('user',message,''),('assistant',result.text,flavor)])
     st.rerun()
@@ -54,14 +59,33 @@ with left:
         with cols[i%3]:
             if st.button(name,key='v2_'+target,use_container_width=True,disabled=s.escaped):
                 submit('Inspect '+name,Action('inspect',target))
+    st.markdown('**Quick actions — no API required**')
+    st.caption('Use these controls if Gemini is slow. The same Python rules apply.')
+    with st.expander('Operate locks and terminal', expanded=True):
+        code = st.text_input('Four-digit combination', max_chars=4, key='v2_quick_code', disabled=s.escaped)
+        c1,c2 = st.columns(2)
+        with c1:
+            if st.button('Unlock drawer', disabled=s.escaped, use_container_width=True):
+                submit('Enter '+code+' on the drawer.', Action('unlock_drawer','drawer',code))
+        with c2:
+            if st.button('Unlock exit', disabled=s.escaped, use_container_width=True):
+                submit('Enter '+code+' on the escape door.', Action('unlock_door','door',code))
+        if st.button('Turn raven eye', disabled=s.escaped, use_container_width=True):
+            submit('Turn the brass eye on the painting.', Action('turn_eye','painting'))
+        if st.button('Restore ECHO terminal', disabled=s.escaped, use_container_width=True):
+            submit('Use the key and access card at the terminal.', Action('restore_terminal','terminal'))
+        if st.button('Ask for a hint', disabled=s.escaped, use_container_width=True):
+            submit('Ask for a hint.', Action('hint'))
     st.subheader('Inventory')
     st.write(' · '.join(sorted(s.inventory)) or 'Empty')
     st.subheader('Progress')
     for flag,name in [('journal_read','Journal discovered'),('books_examined','Marked books examined'),('painting_open','Silver key found'),('drawer_open','Access card found'),('terminal_unlocked','ECHO restored'),('escaped','Escaped')]:
         st.write(('✅ ' if getattr(s,flag) else '○ ')+name)
-    if st.button('Restart game',use_container_width=True): reset();st.rerun()
+    st.button('Restart game',use_container_width=True,on_click=reset)
 with right:
     st.subheader('ECHO — AI Game Master')
+    st.checkbox('Extra AI atmosphere (slower)', value=False, key='v2_extra_narration', help='Optional second Gemini call for narrative flavor. Leave off for fast mode.')
+    st.caption('Fast mode: Gemini interprets text; Python returns the verified outcome. Quick actions work locally.')
     if not KEY: st.warning('Configure GEMINI_API_KEY privately in .env and restart. Visual inspection still works.')
     for role,content,flavor in st.session_state.v2_messages:
         with st.chat_message(role):
